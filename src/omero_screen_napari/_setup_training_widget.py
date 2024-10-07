@@ -215,8 +215,11 @@ class MetaDataSaver:
     # Dosyayı OMERO'ya yükleme fonksiyonu
     def upload_json_to_dataset(self, conn, dataset, json_file_path):
 
+        # Ensure we are using the DatasetWrapper object from the gateway
+        dataset_wrapper = conn.getObject("Dataset", dataset.getId())
+
         # Check for existing annotations and delete if a file with the same name exists
-        existing_annotations = list(dataset.listAnnotations(ns='omero.namespace.json'))
+        existing_annotations = list(dataset_wrapper.listAnnotations(ns='omero.namespace.json'))
         for annotation in existing_annotations:
             linked_file = annotation.getFile()
             if linked_file.getName() == os.path.basename(json_file_path):
