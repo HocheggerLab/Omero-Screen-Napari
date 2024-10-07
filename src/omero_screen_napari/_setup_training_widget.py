@@ -13,6 +13,13 @@ from omero_screen_napari.gallery_userdata_singleton import (
 )
 from omero_screen_napari.omero_data import OmeroData
 from omero_screen_napari.omero_data_singleton import omero_data
+from omero_screen_napari.utils import omero_connect
+
+from omero.gateway import BlitzGateway
+from omero.model import ProjectI, DatasetI, ProjectDatasetLinkI
+import omero.rtypes as rtypes
+from omero.model import FileAnnotationI, OriginalFileI, FilesetEntryI
+import os
 
 logger = logging.getLogger("omero-screen-napari")
 logging.basicConfig(level=logging.DEBUG)
@@ -138,6 +145,124 @@ class MetaDataSaver:
         except Exception as e:  # noqa: BLE001
             logger.error(e)
             self._show_error_message(str(e))
+        
+    @omero_connect
+    def save_data_to_omero(self, conn=None):
+        # Proje ve dataset bilgileri
+        project_id = 3  # Mevcut proje ID'si
+        dataset_name = self.classifier_name+"_Dataset"
+
+        # Check if a dataset with the given name already exists in the project
+        dataset = self.get_existing_dataset_in_project(conn, project_id, dataset_name)
+        
+        if dataset:
+            print(f"Dataset already exists: {dataset_name}. Uploading file to the existing dataset.")
+        else:
+            # Create a new dataset if it doesn't already exist
+            dataset = self.create_dataset_in_project(conn, project_id, dataset_name)
+            print(f"New dataset created: {dataset_name}")
+
+        # JSON dosyasını dataset'e yükleme
+        json_file_path = self.meta_data_path
+        self.upload_json_to_dataset(conn, dataset, json_file_path)
+
+        # Check if the link between the project and dataset already exists
+        project = conn.getObject("Project", project_id)
+        existing_link = False
+
+        for link in project.listChildren():
+            if link.getId() == dataset.getId():
+                existing_link = True
+                break
+
+        if not existing_link:
+            link = ProjectDatasetLinkI()
+            link.setParent(ProjectI(project_id, False))
+            link.setChild(DatasetI(dataset.getId(), False))
+            saved_link = conn.getUpdateService().saveObject(link)
+            print("New link between project and dataset created.")
+        else:
+            print("The link between the project and dataset already exists. No new link was created.")
+
+    # Function to check if a dataset with the specified name already exists in the project
+    def get_existing_dataset_in_project(self, conn, project_id, dataset_name):
+        project = conn.getObject("Project", project_id)
+        if project is None:
+            raise ValueError(f"No Project Found: {project_id}")
+
+        # Look for the dataset with the specified name within the project
+        for dataset in project.listChildren():
+            if dataset.getName() == dataset_name:
+                return dataset
+
+        # Return None if no matching dataset is found
+        return None
+    
+
+    # Proje ID'sini alarak dataset oluşturma
+    def create_dataset_in_project(self, conn, project_id, dataset_name):
+        project = conn.getObject("Project", project_id)
+        if project is None:
+            raise ValueError(f"No Project Found: {project_id}")
+        
+        # Yeni dataset oluştur
+        dataset = DatasetI()
+        dataset.setName(rtypes.rstring(dataset_name))  # omero.rtypes.rstring kullanımı
+        dataset = conn.getUpdateService().saveAndReturnObject(dataset)
+        
+        return dataset
+
+    # Dosyayı OMERO'ya yükleme fonksiyonu
+    def upload_json_to_dataset(self, conn, dataset, json_file_path):
+
+        # Check for existing annotations and delete if a file with the same name exists
+        existing_annotations = list(dataset.listAnnotations(ns='omero.namespace.json'))
+        for annotation in existing_annotations:
+            linked_file = annotation.getFile()
+            if linked_file.getName() == os.path.basename(json_file_path):
+                print(f"Existing file {linked_file.getName()} found. Deleting it before uploading the new file.")
+                conn.deleteObjects("Annotation", [annotation.getId()], deleteAnns=True)
+                print(f"Existing file {linked_file.getName()} has been deleted.")
+
+        with open(json_file_path, 'rb') as json_file:
+            file_size = os.path.getsize(json_file_path)
+
+            # OriginalFile oluştur
+            omero_file = OriginalFileI()
+            omero_file.setName(rtypes.rstring(os.path.basename(json_file_path)))
+            omero_file.setPath(rtypes.rstring(os.path.dirname(json_file_path)))
+            omero_file.setSize(rtypes.rlong(file_size))
+            omero_file.setMimetype(rtypes.rstring('application/json'))
+
+            # Dosyayı sunucuya yükleyin
+            original_file = conn.getUpdateService().saveAndReturnObject(omero_file)
+            
+            # Dosyayı anotasyon olarak dataset'e ekleyin
+            file_ann = FileAnnotationI()
+            file_ann.setFile(original_file)
+            file_ann.setNs(rtypes.rstring("omero.namespace.json"))
+
+            # Save the file annotation object
+            saved_file_ann = conn.getUpdateService().saveAndReturnObject(file_ann)
+
+            # Ensure that the saved annotation is wrapped in the appropriate gateway object
+            wrapped_annotation = conn.getObject("Annotation", saved_file_ann.id.val)
+
+            # After the annotation is created, check and link it to the dataset
+            if wrapped_annotation is not None:
+                dataset = conn.getObject("Dataset", dataset.id)  # Refresh the dataset object using dataset.id
+                dataset.linkAnnotation(wrapped_annotation)
+                print("File successfully linked to the dataset.")
+            else:
+                print("File annotation could not be created.")
+            
+            # Dataset ile ilişkilendir
+            # conn.getUpdateService().saveObject(dataset)
+            # dataset.linkAnnotation(file_ann)
+            # dataset = conn.getObject("Dataset", dataset.id.val)  # Dataset'i tekrar yükleyerek güncelle
+            self._show_success_message(f"Metadata successfully saved to Omero.")
+            print(f"JSON dosyası başarıyla dataset'e yüklendi: {json_file_path}")
+
 
     def _update_classifier_name(self, new_classifier_name: str):
         self.classifier_name = new_classifier_name
@@ -183,6 +308,7 @@ class MetaDataSaver:
             json.dump(self.metadata, json_file)
         logger.info(f"Training Metadata saved to: {self.classifier_dir}")
         self._show_success_message(f"Metadata successfully saved to : {self.classifier_dir}.")
+        self.save_data_to_omero()
 
     def _set_paths(self):
         return self.classifier_dir / "metadata.json"
