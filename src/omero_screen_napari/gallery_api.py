@@ -132,12 +132,17 @@ class CroppedImageParser:
     def _select_image_data(self, df: pl.DataFrame, image_id: int):
         logger.debug(f"Selecting data for image id: {image_id}")
         if "timepoint" in df.columns:
-            filtered_df = df.filter((df["image_id"] == image_id) & (df["timepoint"] == self._user_data.timepoint))
+            filtered_df = df.filter(
+                (df["image_id"] == image_id)
+                & (df["timepoint"] == self._user_data.timepoint)
+            )
         else:
             filtered_df = df.filter(df["image_id"] == image_id)
         logger.debug(f"The length of the filtered df is {len(filtered_df)}")
         cellcycle_filtered_df = self._select_cellcycledata(filtered_df)
-        logger.debug(f"The length of the cellcycle filtered df is {len(cellcycle_filtered_df)}")
+        logger.debug(
+            f"The length of the cellcycle filtered df is {len(cellcycle_filtered_df)}"
+        )
         if cellcycle_filtered_df.shape[0] == 0:
             logger.error(
                 f"The selected image id: {image_id} does not have data in the well_ifdata dataframe"
@@ -149,6 +154,34 @@ class CroppedImageParser:
         self._centroids_row, self._centroids_col = self._select_centroids(
             cellcycle_filtered_df
         )
+        self.log_duplcate_centroids()
+
+    def log_duplcate_centroids(self):
+        # Step 1: Find the indices where duplicates occur in self._centroids_row
+        row_duplicate_indices = [
+            i
+            for i, val in enumerate(self._centroids_row)
+            if self._centroids_row.count(val) > 1
+        ]
+
+        # Step 2: Find the indices where duplicates occur in self._centroids_col
+        col_duplicate_indices = [
+            i
+            for i, val in enumerate(self._centroids_col)
+            if self._centroids_col.count(val) > 1
+        ]
+
+        # Step 3: Find the common indices where both lists have duplicates
+        common_duplicate_indices = set(row_duplicate_indices) & set(
+            col_duplicate_indices
+        )
+
+        # Step 4: Count how many such indices exist
+        count_common_duplicates = len(common_duplicate_indices)
+        if count_common_duplicates > 0:
+            logger.error(
+                f"Number of common duplicate indices: {count_common_duplicates}"
+            )
 
     def _select_cellcycledata(self, df):
         cellcycle = self._user_data.cellcycle
@@ -162,8 +195,12 @@ class CroppedImageParser:
     def _select_centroids(self, df) -> tuple[list[int], list[int]]:
         if self._user_data.segmentation == "nucleus":
             return df["centroid-0"].to_list(), df["centroid-1"].to_list()
-        else:
-            return df["centroid-0_x"].to_list(), df["centroid-1_x"].to_list()
+        unique_centroids_df = df.unique(
+            subset=["centroid-0_x", "centroid-1_x"]
+        )
+        return unique_centroids_df[
+            "centroid-0_x"
+        ].to_list(), unique_centroids_df["centroid-1_x"].to_list()
 
     def _crop_data(self):
         for i, image_id in enumerate(self._image_ids):
@@ -185,7 +222,7 @@ class CroppedImageParser:
         logger.debug(
             f"Shape of selected labels for cropping  is {self._labels.shape}"
         )
-        if len(self._images.shape)==5:
+        if len(self._images.shape) == 5:
             timepoint = self._user_data.timepoint
             current_data, current_labels = (
                 self._images[index, timepoint, ...],
@@ -278,7 +315,6 @@ def crop_region(
     crop_col_start, crop_col_end = calculate_crop_coordinates(
         centroid_col, current_data.shape[-2], crop_size
     )
-
 
     # Crop the region from the image
     cropped_region = current_data[
@@ -710,7 +746,9 @@ def _save_gallery(
     cropped_image_parser = CroppedImageParser(omero_data, userdata)
     cropped_image_parser.parse_crops()
     for i in range(galleries):
-        random_image_parser = RandomImageParser(omero_data, userdata, classifier=False)
+        random_image_parser = RandomImageParser(
+            omero_data, userdata, classifier=False
+        )
         random_image_parser.parse_random_images()
         gallery_parser = ParseGallery(omero_data, userdata, show_gallery=False)
         fig = gallery_parser.plot_gallery()
