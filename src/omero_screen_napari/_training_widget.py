@@ -19,6 +19,17 @@ from omero_screen_napari.gallery_userdata import UserData
 from omero_screen_napari.gallery_userdata_singleton import userdata
 from omero_screen_napari.omero_data import OmeroData
 from omero_screen_napari.omero_data_singleton import omero_data
+from omero_screen_napari.utils import omero_connect
+
+from omero.gateway import BlitzGateway, MapAnnotationWrapper, FileAnnotationWrapper
+from omero.rtypes import rstring
+from omero.model import ImageI, FileAnnotationI
+from omero.sys import ParametersI
+import numpy as np
+from PIL import Image
+from pathlib import Path
+import os
+
 
 logger = logging.getLogger("omero-screen-napari")
 logging.basicConfig(level=logging.DEBUG)
@@ -527,6 +538,8 @@ class TrainingDataSaver:
             f"Data for image {self.file_name} successfully saved, with metadata present."
         )
 
+        self._upload_npy_to_omero()
+        
     def _set_paths(self):
         plate = self.omero_data.plate_id
         well = self.omero_data.well_pos_list[0]
@@ -591,6 +604,52 @@ class TrainingDataSaver:
     def _save_metadata(self, meta_data_path: Path, metadata: dict):
         with meta_data_path.open("w") as json_file:
             json.dump(metadata, json_file)
+
+    @omero_connect
+    def _upload_npy_to_omero(self, conn=None):
+
+        npy_file_path = Path(self.file_path) 
+        dataset_name = self.classifier_name + "_Dataset"
+        dataset_id = self.get_dataset_ids_by_name(conn, dataset_name)
+        dataset = conn.getObject("Dataset", dataset_id[0])
+        
+        if dataset is None:
+            raise Exception(f"Dataset not found. Dataset ID: {dataset_id}")
+
+       # Check for existing File Annotations and delete any with the same name
+        for ann in dataset.listAnnotations():
+            if isinstance(ann, FileAnnotationWrapper):
+                file_name = ann.getFile().getName()
+                if file_name == npy_file_path.name:  # If file names match
+                    print(f"Existing file found: {file_name}. Deleting it.")
+                    conn.deleteObjects("Annotation", [ann.getId()], wait=True)
+                    print(f"File {file_name} has been deleted.")
+
+        # Upload the .npy file as a File Annotation
+        file_ann = conn.createFileAnnfromLocalFile(
+            str(npy_file_path),
+            mimetype="application/octet-stream",  # MIME type for binary files
+            ns="example.namespace",               # Namespace, customizable if desired
+            desc="Uploaded .npy file"             # Description
+        )
+
+        # Add the File Annotation to the dataset
+        dataset.linkAnnotation(file_ann)
+        _show_success_message("npy file successfully uploaded to omero")
+
+    def get_dataset_ids_by_name(self, conn, dataset_name):
+        query = "select obj from Dataset obj where obj.name = :name"
+        params = ParametersI()
+        params.addString("name", dataset_name)
+
+        # Use findAllByQuery to get all datasets that match the given name
+        datasets = conn.getQueryService().findAllByQuery(query, params)
+
+        if datasets:
+            dataset_ids = [dataset.getId().getValue() for dataset in datasets]
+            return dataset_ids
+        else:
+            return None  # Return None if no matching datasets are found
 
 def _show_error_message(message: str):
     msg_box = QMessageBox()
