@@ -63,6 +63,9 @@ class OmeroData:
     pixel_size: tuple = field(default_factory=tuple)
     channel_data: dict = field(default_factory=dict)
     intensities: dict = field(default_factory=dict)
+    # crop in order XYZCT
+    crop_start: tuple = field(default_factory=tuple)
+    crop_length: tuple = field(default_factory=tuple)
 
     # Well data
 
