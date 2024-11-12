@@ -1034,7 +1034,7 @@ class ImageParser:
             self._omero_data.images = new_images
             self._omero_data.image_ids = self._image_ids
             logger.debug(
-                f"Images loaded to empty omero_data.images, new shape: {self._omero_data.images.shape}"
+                f"Images loaded to empty omero_data.images, new shape: {new_images.shape} ({new_images.dtype})"
             )
         else:
             self._omero_data.images = np.concatenate(
@@ -1054,7 +1054,7 @@ class ImageParser:
         """
         self._collect_labels()
         if self._omero_data.labels.size == 0:
-            logger.debug(f"Labels shape: {self._label_arrays[0].shape}")
+            logger.debug(f"Labels shape: {self._label_arrays[0].shape} ({self._label_arrays[0].dtype})")
             self._omero_data.labels = np.stack(self._label_arrays, axis=0)
 
             logger.debug(
@@ -1178,6 +1178,16 @@ class ImageParser:
                     axis_lengths = length[:3] + (image.getSizeC(),) + length[4:]
 
             _, label_array = get_image(self._conn, label_data.getId(), start_coords=start, axis_lengths=axis_lengths)
+
+            # Prefer 16-bit/32-bit integer
+            m = np.max(label_array)
+            if m < 2**16:
+                label_array = label_array.astype(np.uint16, copy=False)
+            elif m < 2**32:
+                label_array = label_array.astype(np.uint32, copy=False)
+            else:
+                label_array = label_array.astype(np.uint64, copy=False)
+
             if label_array.shape[-1] == 2:
                 corrected_label_array = correct_channel_order(label_array)
                 self._label_arrays.append(corrected_label_array.squeeze())
@@ -1372,7 +1382,7 @@ def stitch_labels(omero_data, rotation=0.0, overlap_x=0, overlap_y=0) -> np.ndar
           tiles1[x] = d = dict()
           for y, im in xd.items():
             d[y] = im[t]
-        l.append(compose_tiles(tiles1, rotation=rotation, ox=-overlap_x, oy=-overlap_y))
+        l.append(compose_labels(tiles1, rotation=rotation, ox=-overlap_x, oy=-overlap_y))
       stitched_image = np.stack(l)
     else:
       stitched_image = compose_labels(tiles, rotation=rotation, ox=-overlap_x, oy=-overlap_y)
