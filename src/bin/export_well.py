@@ -57,7 +57,7 @@ def parse_args():
     type=dir_path,
     help='Output directory (default: %(default)s)')
   parser.add_argument('--time', default='All',
-    help='Time position (e.g. All; 1-3; 2)')
+    help='Time position (e.g. All; 1-3; 2) (default: %(default)s)')
 
   group = parser.add_argument_group('Composition Options')
   group.add_argument('--rotation', type=float, default=0.15,
