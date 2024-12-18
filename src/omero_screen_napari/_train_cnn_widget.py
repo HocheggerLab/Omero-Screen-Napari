@@ -130,7 +130,6 @@ class TrainCNNWidget:
         self.test_loader = None
         self.device = torch.device("mps")
         self.image_channels = 2
-        self.model = ROIBasedDenseNetModel(num_classes=7, num_channels=self.image_channels).to(self.device)
 
     def open_folder_dialog(self):
         folder_path = QFileDialog.getExistingDirectory(caption="Select Dataset Folder")
@@ -154,6 +153,8 @@ class TrainCNNWidget:
         self.class_options = metadata['class_options']
         if 'unassigned' in self.class_options:
             self.class_options.remove('unassigned')
+
+        self.image_channels = len(metadata['user_data']['channels'])
 
         training_dicts = []
         i = 0
@@ -561,7 +562,7 @@ class TrainCNNWidget:
             else:
                 print("Model file annotation could not be created.")
 
-            self._show_success_message(f"Model successfully uploaded to Omero.")
+            #self._show_success_message(f"Model successfully uploaded to Omero.")
             print(f"Model successfully uploaded to Omero: {self.model_save_path}")
     
     @omero_connect
@@ -630,7 +631,7 @@ class TrainCNNWidget:
         dataset.linkAnnotation(file_ann)
         print("Metadata file successfully linked to the dataset.")
 
-        self._show_success_message("Metadata successfully uploaded to Omero.")
+        #self._show_success_message("Metadata successfully uploaded to Omero.")
 
 
 
