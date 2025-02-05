@@ -1081,7 +1081,7 @@ class ImageParser:
         for index in tqdm(self._image_index):
             if image := self._well.getImage(index):
                 # Support time point...
-                logger.info(f"Image {image.getId()}:tzyxc={image.getSizeT()},{image.getSizeZ()},{image.getSizeY()},{image.getSizeX()},{image.getSizeC()}")
+                logger.info(f"Image {image.getId()}:tzyxc={image.getSizeT()},{image.getSizeZ()},{image.getSizeY()},{image.getSizeX()},{image.getSizeC()}:{image.getPixelsType()}")
 
                 if mip_id := self.check_mip(image):
                     logger.info(
@@ -1136,6 +1136,8 @@ class ImageParser:
         if len(corrected_array.shape) == 2:
             corrected_array = corrected_array[..., np.newaxis]
         logger.debug(f"Corrected image shape: {corrected_array.shape}")
+        # Retain type
+        corrected_array = _as_dtype(image_array.dtype, corrected_array)
         return corrected_array
 
     def _check_label_data(self):
@@ -1293,10 +1295,14 @@ def compose_tiles(
   # The mask uses nearest-neighbour interpolation to effectivly mark the pixels
   # of interest.
   y = next(iter(tiles[maxx]))
-  os = tiles[maxx][y].shape
+  im = tiles[maxx][y]
+  os = im.shape
   m = np.ones(os[0:2], dtype=int)
   m = transform.rotate(m, rotation, resize=True, preserve_range=True, order=0)
   ns = m.shape
+
+  # preserve image type
+  dtype = im.dtype
 
   # Create weights for blending overlap.
   if edge:
@@ -1334,7 +1340,22 @@ def compose_tiles(
   indices = sum != 0
   for c in range(channels):
     out[..., c] = np.divide(out[..., c], sum, where=indices, out=np.zeros(sum.shape))
-  return out
+  return _as_dtype(dtype, out)
+
+def _as_dtype(dtype, array):
+    """Return the result as the given type.
+    The array is clipped in-place to the min/max range for the type and a new array returned.
+    returns: [np.ndarray] array converted to the type
+    """
+    # Retain type
+    if issubclass(dtype.type, np.integer):
+        info = np.iinfo(dtype)
+        return np.clip(array, a_min=info.min, a_max=info.max, out=array).astype(dtype)
+    if issubclass(dtype.type, np.floating):
+        info = np.finfo(dtype)
+        return np.clip(array, a_min=info.min, a_max=info.max, out=array).astype(dtype)
+    # Possibly not a correct dtype?
+    return array
 
 def stitch_labels(omero_data, rotation=0.0, overlap_x=0, overlap_y=0) -> np.ndarray:
     """Stitch the labels in the array according to the specified pattern

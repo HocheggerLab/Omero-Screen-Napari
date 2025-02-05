@@ -123,6 +123,7 @@ def clear_viewer_layers(viewer: Viewer) -> None:
 
 def add_image_to_viewer(viewer: Viewer) -> None:
     num_channels = omero_data.images.shape[-1]
+    print(f"The images shape is {omero_data.images.shape} ({omero_data.images.dtype})")
     for i in range(num_channels):
         image_data = omero_data.images[..., i]
         layer = viewer.add_image(image_data, scale=omero_data.pixel_size)
@@ -185,7 +186,7 @@ def add_label_layers(viewer: Viewer, labels: np.array = None) -> None:
       labels = omero_data.labels
     if labels is None:
       return
-    print(f"The labels shape is {labels.shape}")
+    print(f"The labels shape is {labels.shape} ({labels.dtype})")
     if labels.shape[-1] == 1:
         viewer.add_labels(
             np.squeeze(labels).astype(int),
@@ -257,6 +258,7 @@ def stitched_data_widget(
     clear_viewer_layers(viewer)
     stitched_images = stitch_images(omero_data, rotation=rotation,
       overlap_x=overlap_x, overlap_y=overlap_y, edge=edge, mode=mode)
+    print(f'Stitched shape {stitched_images.shape} ({stitched_images.dtype})')
     viewer.add_image(
       stitched_images,
       contrast_limits=list(omero_data.intensities[0]),
