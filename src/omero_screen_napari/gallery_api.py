@@ -16,6 +16,8 @@ from omero_screen_napari.gallery_userdata import UserData
 from omero_screen_napari.omero_data import OmeroData
 from omero_screen_napari.utils import omero_connect, save_fig, scale_image
 from omero_screen_napari.welldata_api import well_image_parser
+from ast import literal_eval
+from collections.abc import Iterable
 
 logger = logging.getLogger("omero-screen-napari")
 
@@ -58,6 +60,7 @@ class CroppedImageParser:
         self._labels: Optional[np.ndarray] = None
         self._centroids_row: list[int] = []
         self._centroids_col: list[int] = []
+        self._ids: list = []
         self._cropped_images: list[np.ndarray] = []
         self._cropped_labels: list[np.ndarray] = []
 
@@ -139,6 +142,7 @@ class CroppedImageParser:
         else:
             filtered_df = df.filter(df["image_id"] == image_id)
         logger.debug(f"The length of the filtered df is {len(filtered_df)}")
+        
         cellcycle_filtered_df = self._select_cellcycledata(filtered_df)
         logger.debug(
             f"The length of the cellcycle filtered df is {len(cellcycle_filtered_df)}"
@@ -151,7 +155,7 @@ class CroppedImageParser:
             #     f"The selected image id {image_id} does not have data in the well_ifdata dataframe"
             # )
 
-        self._centroids_row, self._centroids_col = self._select_centroids(
+        self._centroids_row, self._centroids_col, self._ids = self._select_centroids(
             cellcycle_filtered_df
         )
         self.log_duplcate_centroids()
@@ -192,15 +196,19 @@ class CroppedImageParser:
         logger.error(f"Invalid cell cycle phase: {cellcycle}")
         raise ValueError(f"Invalid cell cycle phase: {cellcycle}")
 
-    def _select_centroids(self, df) -> tuple[list[int], list[int]]:
+    def _select_centroids(self, df) -> tuple[list[int], list[int], list[int]]:
         if self._user_data.segmentation == "nucleus":
-            return df["centroid-0"].to_list(), df["centroid-1"].to_list()
+            # labels may be average IDs (float64) or tuple of IDs. Convert strings if present.
+            ids = df["label"]
+            if ids.dtype == pl.datatypes.String:
+                ids = ids.apply(literal_eval)
+            return df["centroid-0"].to_list(), df["centroid-1"].to_list(), ids.to_list()
         unique_centroids_df = df.unique(
             subset=["centroid-0_x", "centroid-1_x"]
         )
         return unique_centroids_df[
             "centroid-0_x"
-        ].to_list(), unique_centroids_df["centroid-1_x"].to_list()
+        ].to_list(), unique_centroids_df["centroid-1_x"].to_list(), unique_centroids_df["Cyto_ID"].to_list()
 
     def _crop_data(self):
         for i, image_id in enumerate(self._image_ids):
@@ -235,9 +243,9 @@ class CroppedImageParser:
             )
         self._select_image_data(self._omero_data.well_ifdata, image_id)
 
-        for row, col in zip(self._centroids_row, self._centroids_col):
+        for row, col, id in zip(self._centroids_row, self._centroids_col, self._ids):
             self._crop_and_process_image(
-                current_data, current_labels, row, col
+                current_data, current_labels, row, col, id
             )
         crop_count = len(self._cropped_images)
         logger.info(
@@ -245,7 +253,7 @@ class CroppedImageParser:
         )
 
     def _crop_and_process_image(
-        self, image: np.ndarray, labels: np.ndarray, row: int, col: int
+        self, image: np.ndarray, labels: np.ndarray, row: int, col: int, id
     ):
         """
         Performs crop cleans mask, checks if mask is present before appending data to cropped_images and cropped_labels lists
@@ -263,12 +271,13 @@ class CroppedImageParser:
                 cropped_image, cropped_label, self._user_data.crop_size
             )
 
-        corrected_cropped_label = erase_masks(cropped_label.copy())
-        if np.any(
-            corrected_cropped_label
-        ):  # Check if the label is effectively empty
-            self._cropped_images.append(cropped_image)
-            self._cropped_labels.append(corrected_cropped_label)
+        # Support multiple labels in the mask
+        for corrected_cropped_label in erase_masks(cropped_label.copy(), id):
+            if np.any(
+                corrected_cropped_label
+            ):  # Check if the label is effectively empty
+                self._cropped_images.append(cropped_image)
+                self._cropped_labels.append(corrected_cropped_label)
 
     def _remove_duplicate_images(self):
         """
@@ -348,23 +357,41 @@ def pad_region(
 
     pad_row = crop_size - cropped_region.shape[0]
     pad_col = crop_size - cropped_region.shape[1]
+    # Pad centrally
     cropped_region = np.pad(
         cropped_region,
-        ((0, pad_row), (0, pad_col), (0, 0)),
+        ((pad_row // 2, pad_row - pad_row // 2), (pad_col // 2, pad_col - pad_col // 2), (0, 0)),
         mode="constant",
     )
     cropped_label = np.pad(
         cropped_label,
-        ((0, pad_row), (0, pad_col)),
+        ((pad_row // 2, pad_row - pad_row // 2), (pad_col // 2, pad_col - pad_col // 2)),
         mode="constant",
     )
     return cropped_region, cropped_label
 
 
-def erase_masks(cropped_label: np.ndarray) -> np.ndarray:
+def erase_masks(cropped_label: np.ndarray, id, tol = 10) -> np.ndarray:
     """
-    Erases all masks in the cropped_label that do not overlap with the centroid.
+    Extracts label regions from the cropped_label. Uses the ID. If this is iterable extract each ID in the iteration.
+    If a scalar integer type then extract the ID. Otherwise ignore (legacy IDs could be a scalar float type)
+    and extract labels within a distance tolerance of the centroid.
+
+    Note that an integer type is detected by checking int(id) == id. This will not detect cases where multiple
+    IDs have been averaged to a single integral value. This is a minority case and allows supporting legacy
+    data with float IDs representing a single label.
     """
+    if np.isscalar(id) and int(id) == id:
+        cropped_label[cropped_label != id] = 0
+        return [cropped_label]
+
+    labels = []
+    if isinstance(id, Iterable):
+        for i in id:
+            l = cropped_label.copy()
+            l[cropped_label != i] = 0
+            labels.append(l)
+        return labels
 
     center_row, center_col = np.array(cropped_label.shape) // 2
 
@@ -386,15 +413,15 @@ def erase_masks(cropped_label: np.ndarray) -> np.ndarray:
             ].centroid
 
             # Using a small tolerance value for comparing centroids
-            tol = 10
-
             if (
-                abs(cropped_centroid_row - center_row) > tol
-                or abs(cropped_centroid_col - center_col) > tol
+                abs(cropped_centroid_row - center_row) <= tol
+                and abs(cropped_centroid_col - center_col) <= tol
             ):
-                cropped_label[binary_mask] = 0
+                l = cropped_label.copy()
+                l[cropped_label != unique_label] = 0
+                labels.append(l)
 
-    return cropped_label
+    return labels
 
 
 # --------------------------Select random images for gallery--------------------
