@@ -1234,6 +1234,10 @@ def stitch_images(omero_data, rotation=0.0, overlap_x=0, overlap_y=0, edge=0, mo
           [1, 2],
           [3, 0],
       ]
+    elif n == 2:
+      indices_pattern = [
+          [0, 1],
+      ]
     else:
         raise ValueError(f"Unsupported number of image tiles: {n}")
 
@@ -1381,6 +1385,10 @@ def stitch_labels(omero_data, rotation=0.0, overlap_x=0, overlap_y=0) -> np.ndar
       indices_pattern = [
           [1, 2],
           [3, 0],
+      ]
+    elif n == 2:
+      indices_pattern = [
+          [0, 1],
       ]
     else:
         raise ValueError(f"Unsupported number of image tiles: {n}")
