@@ -1221,25 +1221,7 @@ def stitch_images(omero_data, rotation=0.0, overlap_x=0, overlap_y=0, edge=0, mo
     size = len(omero_data.images.shape)
     assert size == 4 or size == 5, "The input array should be N-images of [T]YXC"
     n = omero_data.images.shape[0]
-    if n == 21:
-      indices_pattern = [
-          [-1, 1, 2, 3, -1],  # Preserved -1 for empty
-          [8, 7, 6, 5, 4],  # Adjusted for zero-based indexing
-          [9, 10, 0, 11, 12],  # The first image is now 0 (zero-based)
-          [17, 16, 15, 14, 13],  # Adjusted for zero-based indexing
-          [-1, 18, 19, 20, -1],  # Preserved -1 for empty
-      ]
-    elif n == 4:
-      indices_pattern = [
-          [1, 2],
-          [3, 0],
-      ]
-    elif n == 2:
-      indices_pattern = [
-          [0, 1],
-      ]
-    else:
-        raise ValueError(f"Unsupported number of image tiles: {n}")
+    indices_pattern = _get_stitch_pattern(n)
 
     # YX order
     tiles = {}
@@ -1268,6 +1250,36 @@ def stitch_images(omero_data, rotation=0.0, overlap_x=0, overlap_y=0, edge=0, mo
 
     logger.debug("Stitched image shape: %s", stitched_image.shape)
     return stitched_image
+
+def _get_stitch_pattern(n: int) -> list[list[int]]:
+    """
+    Gets the Operetta microscope stitch pattern for the given number of tiles.
+    Args:
+        n: Number of tiles
+    Returns
+        list of lists of indices: rows of y; each row contains columns of x. The index
+        at the YX position is the index into the n tiles for that (X,Y) location.
+    """
+    if n == 21:
+      indices_pattern = [
+          [-1, 1, 2, 3, -1],  # Preserved -1 for empty
+          [8, 7, 6, 5, 4],  # Adjusted for zero-based indexing
+          [9, 10, 0, 11, 12],  # The first image is now 0 (zero-based)
+          [17, 16, 15, 14, 13],  # Adjusted for zero-based indexing
+          [-1, 18, 19, 20, -1],  # Preserved -1 for empty
+      ]
+    elif n == 4:
+      indices_pattern = [
+          [1, 2],
+          [3, 0],
+      ]
+    elif n == 2:
+      indices_pattern = [
+          [0, 1],
+      ]
+    else:
+        raise ValueError(f"Unsupported number of image tiles: {n}")
+    return indices_pattern
 
 def compose_tiles(
   tiles: dict[int, dict[int, np.array]],
@@ -1373,25 +1385,7 @@ def stitch_labels(omero_data, rotation=0.0, overlap_x=0, overlap_y=0) -> np.ndar
     size = len(omero_data.labels.shape)
     assert size == 4 or size == 5, "The input array should be N-images of [T]YXC"
     n = omero_data.labels.shape[0]
-    if n == 21:
-      indices_pattern = [
-          [-1, 1, 2, 3, -1],  # Preserved -1 for empty
-          [8, 7, 6, 5, 4],  # Adjusted for zero-based indexing
-          [9, 10, 0, 11, 12],  # The first image is now 0 (zero-based)
-          [17, 16, 15, 14, 13],  # Adjusted for zero-based indexing
-          [-1, 18, 19, 20, -1],  # Preserved -1 for empty
-      ]
-    elif n == 4:
-      indices_pattern = [
-          [1, 2],
-          [3, 0],
-      ]
-    elif n == 2:
-      indices_pattern = [
-          [0, 1],
-      ]
-    else:
-        raise ValueError(f"Unsupported number of image tiles: {n}")
+    indices_pattern = _get_stitch_pattern(n)
 
     tiles = {}
     for y, row in enumerate(indices_pattern):
