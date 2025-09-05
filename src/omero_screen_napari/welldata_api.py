@@ -1277,6 +1277,12 @@ def _get_stitch_pattern(n: int) -> list[list[int]]:
       indices_pattern = [
           [0, 1],
       ]
+    elif n == 9:
+      indices_pattern = [
+          [1, 2, 3],
+          [6, 5, 4],
+          [7, 8, 0],
+      ]
     else:
         raise ValueError(f"Unsupported number of image tiles: {n}")
     return indices_pattern
