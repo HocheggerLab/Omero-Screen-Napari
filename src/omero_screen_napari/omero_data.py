@@ -63,6 +63,9 @@ class OmeroData:
     pixel_size: tuple = field(default_factory=tuple)
     channel_data: dict = field(default_factory=dict)
     intensities: dict = field(default_factory=dict)
+    # crop in order XYZCT
+    crop_start: tuple = field(default_factory=tuple)
+    crop_length: tuple = field(default_factory=tuple)
 
     # Well data
 
@@ -74,6 +77,7 @@ class OmeroData:
 
     # Image data
     images: np.ndarray = field(default_factory=lambda: np.empty((0,)))
+    stitched_images: np.ndarray = field(default_factory=lambda: np.empty((0,)))
     image_ids: list = field(default_factory=list)
     labels: np.ndarray = field(default_factory=lambda: np.empty((0,)))
 

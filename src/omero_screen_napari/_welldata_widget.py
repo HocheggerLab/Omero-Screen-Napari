@@ -12,12 +12,13 @@ from typing import Optional
 
 import numpy as np
 from magicgui import magic_factory
+from magicgui.widgets import Container
 from napari.layers import Image
 from napari.viewer import Viewer
 from PyQt5.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 from omero_screen_napari.omero_data_singleton import omero_data
-from omero_screen_napari.welldata_api import parse_omero_data
+from omero_screen_napari.welldata_api import parse_omero_data, stitch_images, stitch_labels
 
 # Looging
 
@@ -65,6 +66,22 @@ class MockEvent:
 # Global variable to keep track of the existing metadata widget
 metadata_widget: Optional[MetadataWidget] = None
 
+# Combine Welldata and Stiched data widgets
+
+def well_widget_combined():
+    """
+    This function combines the well and stitched data widgets into a single widget.
+    """
+    # Call the magic factories to get the widget instances
+    welldata_widget_instance = welldata_widget()
+    stitched_data_widget_instance = stitched_data_widget()
+    return Container(
+        widgets=[
+            welldata_widget_instance,
+            stitched_data_widget_instance,
+        ]
+    )
+
 
 # Widget to call Omero and load well images
 
@@ -75,6 +92,7 @@ def welldata_widget(
     plate_id: str = "Plate ID",
     well_pos_list: str = "Well Position",
     images: str = "All",
+    time: str = "All",
 ) -> None:
     """
     This function is a widget for handling well data in a napari viewer.
@@ -82,7 +100,7 @@ def welldata_widget(
     and then adds the images and labels to the viewer. It also handles metadata,
     sets color maps, and adds label layers to the viewer.
     """
-    parse_omero_data(omero_data, plate_id, well_pos_list, images)
+    parse_omero_data(omero_data, plate_id, well_pos_list, images, time=time)
     clear_viewer_layers(viewer)
     add_image_to_viewer(viewer)
     set_color_maps(viewer)
@@ -105,6 +123,7 @@ def clear_viewer_layers(viewer: Viewer) -> None:
 
 def add_image_to_viewer(viewer: Viewer) -> None:
     num_channels = omero_data.images.shape[-1]
+    print(f"The images shape is {omero_data.images.shape} ({omero_data.images.dtype})")
     for i in range(num_channels):
         image_data = omero_data.images[..., i]
         layer = viewer.add_image(image_data, scale=omero_data.pixel_size)
@@ -161,18 +180,22 @@ def set_color_maps(viewer: Viewer) -> None:
         layer.colormap = color_maps[name]
 
 
-def add_label_layers(viewer: Viewer) -> None:
+def add_label_layers(viewer: Viewer, labels: np.array = None) -> None:
     scale = omero_data.pixel_size
-    print(f"The labels shape loaed in line 159 is {omero_data.labels.shape}")
-    if omero_data.labels.shape[-1] == 1:
+    if labels is None:
+      labels = omero_data.labels
+    if labels is None:
+      return
+    print(f"The labels shape is {labels.shape} ({labels.dtype})")
+    if labels.shape[-1] == 1:
         viewer.add_labels(
-            np.squeeze(omero_data.labels).astype(int),
+            np.squeeze(labels).astype(int),
             name="Nuclei Masks",
             scale=scale,
         )
-    elif omero_data.labels.shape[-1] == 2:
-        channel_1_masks = omero_data.labels[..., 0].astype(int)
-        channel_2_masks = omero_data.labels[..., 1].astype(int)
+    elif labels.shape[-1] == 2:
+        channel_1_masks = labels[..., 0].astype(int)
+        channel_2_masks = labels[..., 1].astype(int)
         viewer.add_labels(channel_1_masks, name="Nuclei Masks", scale=scale)
         viewer.add_labels(channel_2_masks, name="Cell Masks", scale=scale)
     else:
@@ -222,3 +245,32 @@ def _generate_color_map(channel_names: dict) -> dict[str, str]:
         color_map_dict[channel] = color
 
     return color_map_dict
+
+@magic_factory(call_button="Enter")
+def stitched_data_widget(
+    viewer: Viewer,
+    rotation: float = 0.15,
+    overlap_x: int = 7,
+    overlap_y: int = 7,
+    edge: int = 7,
+    mode: str = 'reflect'
+) -> None:
+    clear_viewer_layers(viewer)
+    stitched_images = stitch_images(omero_data, rotation=rotation,
+      overlap_x=overlap_x, overlap_y=overlap_y, edge=edge, mode=mode)
+    print(f'Stitched shape {stitched_images.shape} ({stitched_images.dtype})')
+    viewer.add_image(
+      stitched_images,
+      contrast_limits=list(omero_data.intensities[0]),
+      gamma=1,
+      channel_axis=-1,
+      scale=omero_data.pixel_size,
+      name='Stitched Image'
+    )
+    if len(omero_data.labels):
+      stitched_labels = stitch_labels(omero_data, rotation=rotation,
+        overlap_x=overlap_x, overlap_y=overlap_y)
+      add_label_layers(viewer, labels=stitched_labels)
+    viewer.scale_bar.visible = True
+    viewer.scale_bar.unit = "µm"
+    viewer.scale_bar.color = "white"
