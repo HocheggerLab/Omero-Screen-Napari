@@ -2,6 +2,7 @@ import os
 
 os.environ["USE_LOCAL_ENV"] = "1"
 import napari
+
 from omero_screen_napari._welldata_widget import (
     MockEvent,
     add_image_to_viewer,

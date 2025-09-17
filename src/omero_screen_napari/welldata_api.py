@@ -464,7 +464,7 @@ class ChannelDataParser:
             ann_value = map_ann.getValue()
             # Assuming the value is a list of tuples or similar structure
             for key, _value in ann_value:
-                if key.lower() in ["dapi", "hoechst"]:
+                if key.lower() in ["dapi", "hoechst", "rfp"]:
                     self._map_annotations = ann_value
                     return  # Return the first matching map annotation's value
 
@@ -490,6 +490,8 @@ class ChannelDataParser:
         }
         if "Hoechst" in self._channel_data:
             self._channel_data["DAPI"] = self._channel_data.pop("Hoechst")
+        if "RFP" in self._channel_data:
+            self._channel_data["DAPI"] = self._channel_data.pop("RFP")
         # check if one of the channels is DAPI otherwise raise exception
 
 
@@ -565,7 +567,7 @@ class FlatfieldMaskParser:
             ann_value = map_ann.getValue()
             # Assuming the value is a list of tuples or similar structure
             for _key, value in ann_value:
-                if value.lower().strip() in ["dapi", "hoechst"]:
+                if value.lower().strip() in ["dapi", "hoechst", "rfp"]:
                     self._flatfield_channels = dict(ann_value)
                     logger.debug(
                         f"Flatfield mask channels: {self._flatfield_channels}"  # noqa: G004
