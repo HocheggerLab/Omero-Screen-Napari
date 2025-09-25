@@ -11,6 +11,7 @@ import polars as pl
 from omero.gateway import BlitzGateway
 from qtpy.QtWidgets import QMessageBox
 from skimage.measure import find_contours, label, regionprops
+from skimage import exposure
 
 from omero_screen_napari.gallery_userdata import UserData
 from omero_screen_napari.omero_data import OmeroData
@@ -32,6 +33,15 @@ def show_gallery(omero_data: OmeroData, user_data: UserData, classifier=False):
             omero_data, user_data, classifier
         )
         random_image_parser.parse_random_images()
+
+        # CroppedImageParser scales images to the range for the type using the mean channel image min/max.
+        # Convert the random images to float64 for the gallery using a consistent range for each sample.
+        if omero_data.selected_images[0].dtype != np.float64:
+            info = np.iinfo(omero_data.cropped_images[0].dtype)
+            omero_data.selected_images = [exposure.rescale_intensity(
+                x.astype(np.float64), in_range=(info.min, info.max)
+            ) for x in omero_data.selected_images]
+
         gallery_parser = ParseGallery(omero_data, user_data)
         gallery_parser.plot_gallery()
     except Exception as e:  # noqa: BLE001
@@ -142,7 +152,7 @@ class CroppedImageParser:
         else:
             filtered_df = df.filter(df["image_id"] == image_id)
         logger.debug(f"The length of the filtered df is {len(filtered_df)}")
-        
+
         cellcycle_filtered_df = self._select_cellcycledata(filtered_df)
         logger.debug(
             f"The length of the cellcycle filtered df is {len(cellcycle_filtered_df)}"
