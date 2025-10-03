@@ -16,9 +16,14 @@ from magicgui.widgets import Container
 from napari.layers import Image
 from napari.viewer import Viewer
 from PyQt5.QtWidgets import QLabel, QVBoxLayout, QWidget
+from vispy.color import Colormap
 
 from omero_screen_napari.omero_data_singleton import omero_data
-from omero_screen_napari.welldata_api import parse_omero_data, stitch_images, stitch_labels
+from omero_screen_napari.welldata_api import (
+    parse_omero_data,
+    stitch_images,
+    stitch_labels,
+)
 
 # Looging
 
@@ -67,6 +72,7 @@ class MockEvent:
 metadata_widget: Optional[MetadataWidget] = None
 
 # Combine Welldata and Stiched data widgets
+
 
 def well_widget_combined():
     """
@@ -123,18 +129,24 @@ def clear_viewer_layers(viewer: Viewer) -> None:
 
 def add_image_to_viewer(viewer: Viewer) -> None:
     num_channels = omero_data.images.shape[-1]
-    print(f"The images shape is {omero_data.images.shape} ({omero_data.images.dtype})")
+    print(
+        f"The images shape is {omero_data.images.shape} ({omero_data.images.dtype})"
+    )
+    channel_names: dict = {
+        int(value): key for key, value in omero_data.channel_data.items()
+    }
     for i in range(num_channels):
         image_data = omero_data.images[..., i]
         layer = viewer.add_image(image_data, scale=omero_data.pixel_size)
-        assert isinstance(
-            layer, Image
-        ), "Expected layer to be an instance of Image"
+        assert isinstance(layer, Image), (
+            "Expected layer to be an instance of Image"
+        )
         layer.contrast_limits_range = (0, 65535)
         specific_intensities = omero_data.intensities[i]
         layer.contrast_limits = specific_intensities
         layer.blending = "additive"
         layer.events.contrast_limits.connect(on_contrast_change)
+        layer.name = channel_names[i]
 
     # Configure the scale bar
     viewer.scale_bar.visible = True
@@ -170,22 +182,18 @@ def handle_metadata_widget(viewer: Viewer, slider_position: int) -> None:
 
 
 def set_color_maps(viewer: Viewer) -> None:
-    channel_names: dict = {
-        key: int(value) for key, value in omero_data.channel_data.items()
-    }
-    color_maps: dict[str, str] = _generate_color_map(channel_names)
-    for name, index in channel_names.items():
-        layer = viewer.layers[index]
-        layer.name = name
-        layer.colormap = color_maps[name]
+    channel_names = [layer.name for layer in viewer.layers]
+    color_maps: list[str] = _generate_color_map(channel_names)
+    for i, c in enumerate(color_maps):
+        viewer.layers[i].colormap = c
 
 
 def add_label_layers(viewer: Viewer, labels: np.array = None) -> None:
     scale = omero_data.pixel_size
     if labels is None:
-      labels = omero_data.labels
+        labels = omero_data.labels
     if labels is None:
-      return
+        return
     print(f"The labels shape is {labels.shape} ({labels.dtype})")
     if labels.shape[-1] == 1:
         viewer.add_labels(
@@ -202,49 +210,55 @@ def add_label_layers(viewer: Viewer, labels: np.array = None) -> None:
         raise ValueError("Invalid segmentation label shape")
 
 
-def _generate_color_map(channel_names: dict) -> dict[str, str]:
+def _generate_color_map(channel_names: list[str]) -> list[str | Colormap]:
     """
-    Generate a color map dictionary for the channels
-    :param channel_names: dictionary of channel names and indices
-    :return: a dictionary with channel names as keys and color names as values
+    Generate a list of color maps for the channels
+    :param channel_names: channel names
+    :return: color map names
     """
-    # Initialize the color map dictionary
-    color_map_dict = {}
+    # Napari supports vispy or matplotlib colormap names
 
     # Determine the number of channels
     num_channels = len(channel_names)
 
-    # If there is only one channel, set it to gray
     if num_channels == 1:
-        single_key = list(channel_names.keys())[0]
-        color_map_dict[single_key] = "gray"
-        return color_map_dict
+        return ["gray"]
 
-    color_map_dict = {"DAPI": "blue"}
+    # Default channel color assignments
+    special_channels = {"DAPI": "blue", "Tub": "green", "EdU": "gray"}
 
-    # Default color assignments for Tub and EdU
-    special_channels = {"Tub": "green", "EdU": "gray"}
-
-    # Determine remaining color options based on presence of Tub and EdU
-    remaining_colors = ["red"]
-    if "Tub" not in channel_names:
-        remaining_colors.append("green")
-    if "EdU" not in channel_names:
-        remaining_colors.append("gray")
-
-    # Assign colors to Tub and EdU if present
-    for channel in special_channels:
-        if channel in channel_names:
-            color_map_dict[channel] = special_channels[channel]
-
-    # Assign remaining colors to any other channels
-    remaining_channels = [
-        channel for channel in channel_names if channel not in color_map_dict
+    # Other color assignments. This list is used in reverse order amd repeated as required.
+    # Supports using a Colormap. This requires the RBG value of the final color.
+    remaining_colors = [
+        "gray",
+        Colormap(["black", "#ff2f92"]),  # strawberry
+        Colormap(["black", "#8efa00"]),  # lime
+        Colormap(["black", "#009193"]),  # teal
+        Colormap(["black", "#00fdff"]),  # turquoise
+        Colormap(["black", "#aa7942"]),  # brown
+        Colormap(["black", "#ffc0cb"]),  # pink
+        "bop orange",
+        "bop blue",
+        "bop purple",
+        "orange",
+        "cyan",
+        "magenta",
+        "yellow",
+        "red",
     ]
-    for channel, color in zip(remaining_channels, remaining_colors):
-        color_map_dict[channel] = color
+    # Do not run out of colours
+    remaining_colors.extend(
+        remaining_colors * (num_channels // len(remaining_colors))
+    )
+    print(remaining_colors)
 
-    return color_map_dict
+    return [
+        special_channels[ch]
+        if ch in special_channels
+        else remaining_colors.pop()
+        for ch in channel_names
+    ]
+
 
 @magic_factory(call_button="Enter")
 def stitched_data_widget(
@@ -253,24 +267,34 @@ def stitched_data_widget(
     overlap_x: int = 7,
     overlap_y: int = 7,
     edge: int = 7,
-    mode: str = 'reflect'
+    mode: str = "reflect",
 ) -> None:
     clear_viewer_layers(viewer)
-    stitched_images = stitch_images(omero_data, rotation=rotation,
-      overlap_x=overlap_x, overlap_y=overlap_y, edge=edge, mode=mode)
-    print(f'Stitched shape {stitched_images.shape} ({stitched_images.dtype})')
+    stitched_images = stitch_images(
+        omero_data,
+        rotation=rotation,
+        overlap_x=overlap_x,
+        overlap_y=overlap_y,
+        edge=edge,
+        mode=mode,
+    )
+    print(f"Stitched shape {stitched_images.shape} ({stitched_images.dtype})")
     viewer.add_image(
-      stitched_images,
-      contrast_limits=list(omero_data.intensities[0]),
-      gamma=1,
-      channel_axis=-1,
-      scale=omero_data.pixel_size,
-      name='Stitched Image'
+        stitched_images,
+        contrast_limits=list(omero_data.intensities[0]),
+        gamma=1,
+        channel_axis=-1,
+        scale=omero_data.pixel_size,
+        name="Stitched Image",
     )
     if len(omero_data.labels):
-      stitched_labels = stitch_labels(omero_data, rotation=rotation,
-        overlap_x=overlap_x, overlap_y=overlap_y)
-      add_label_layers(viewer, labels=stitched_labels)
+        stitched_labels = stitch_labels(
+            omero_data,
+            rotation=rotation,
+            overlap_x=overlap_x,
+            overlap_y=overlap_y,
+        )
+        add_label_layers(viewer, labels=stitched_labels)
     viewer.scale_bar.visible = True
     viewer.scale_bar.unit = "µm"
     viewer.scale_bar.color = "white"

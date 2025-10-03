@@ -10,9 +10,13 @@ import traceback
 from pathlib import Path
 from typing import Callable, Optional, Tuple
 
+import os
 import numpy as np
 import omero
 import polars as pl
+import pandas as pd
+import tempfile
+
 from ezomero import get_image  # type: ignore
 from omero.gateway import (
     BlitzGateway,
@@ -50,6 +54,7 @@ def parse_omero_data(
     image_input: str,
     time: str = "All",
     conn: Optional[BlitzGateway] = None,
+    options: list[str] = [],
 ) -> None:
     """
     This functions controls the flow of the data
@@ -63,18 +68,29 @@ def parse_omero_data(
         The images options are 'All'; 0-3; 1, 3, 4.
         conn (BlitzGateway): BlitzGateway connection.
         time (str): String describing the time frames. Options are 'All'; 0-3 (range); 0 (single).
+        options: List of options (ignore_labels; ignore_result_data; ignore_scale_intensities)
     """
     plate_number = int(plate_id)
     if conn is not None:
         try:
             parse_plate_data(
-                omero_data, plate_number, well_pos, image_input, conn, time=time
+                omero_data,
+                plate_number,
+                well_pos,
+                image_input,
+                conn,
+                time=time,
+                options=options,
             )
             # clear well and image data to avoid appending to existing data
             omero_data.reset_well_and_image_data()
+            load_result_data = "ignore_result_data" not in options
+            load_labels = "ignore_labels" not in options
             for well_pos in omero_data.well_pos_list:
                 logger.info(f"Processing well {well_pos}")  # noqa: G004
-                well_image_parser(omero_data, well_pos, conn)
+                well_image_parser(
+                    omero_data, well_pos, conn, load_result_data, load_labels
+                )
         except Exception as e:  # noqa: BLE001
             logger.error(
                 f"Error parsing plate data: {e}\n{''.join(traceback.format_exception(None, e, e.__traceback__))}"
@@ -95,6 +111,7 @@ def parse_plate_data(
     image_input: str,
     conn: BlitzGateway,
     time: str = "All",
+    options: list[str] = [],
 ) -> None:
     """
     Function that combines the different parser classes that are responsible to process userinput
@@ -108,6 +125,7 @@ def parse_plate_data(
                             The images options are 'All'; 0-3; 1, 3, 4.
         conn (BlitzGateway): BlitzGateway connection.
         time (str): String describing the time frames. Options are 'All'; 0-3 (range); 0 (single).
+        options: List of options (ignore_result_data; ignore_scale_intensities)
     """
     # check if plate-ID already supplied, if it is then skip PlateHandler
     if plate_id != omero_data.plate_id:
@@ -118,14 +136,18 @@ def parse_plate_data(
         )
         user_input.parse_data()
         logger.info(f"Loaded data for plate with ID {plate_id}")
-        csv_parser = CsvFileParser(omero_data)
-        csv_parser.parse_csv()
+        # Optionally disable: Provides access to the OMERO screen results data
+        if "ignore_result_data" not in options:
+            csv_parser = CsvFileParser(omero_data)
+            csv_parser.parse_csv()
         channel_parser = ChannelDataParser(omero_data)
         channel_parser.parse_channel_data()
         flatfield_parser = FlatfieldMaskParser(omero_data, conn)
         flatfield_parser.parse_flatfieldmask()
-        scale_intensity_parser = ScaleIntensityParser(omero_data)
-        scale_intensity_parser.parse_intensities()
+        # Optionally disable: Controls the min-max display range across wells
+        if "ignore_scale_intensities" not in options:
+            scale_intensity_parser = ScaleIntensityParser(omero_data)
+            scale_intensity_parser.parse_intensities()
         pixel_size_parser = PixelSizeParser(omero_data)
         pixel_size_parser.parse_pixel_size_values()
 
@@ -140,7 +162,11 @@ def parse_plate_data(
 
 
 def well_image_parser(
-    omero_data: OmeroData, well_pos: str, conn: BlitzGateway
+    omero_data: OmeroData,
+    well_pos: str,
+    conn: BlitzGateway,
+    load_result_data: bool = True,
+    load_labels: bool = True,
 ):
     """
     Function that combines the different parser classes that are responsible to process well, image and label data.
@@ -150,13 +176,15 @@ def well_image_parser(
         omero_data (OmeroData): OmeroData class object that receives the parsed data
         well_pos (str): List of wells provided by welldata_widget (e.g 'A1, A2')
         conn (BlitzGateway): BlitzGateway connection.
-        time (str): String describing the time frames. Options are 'All'; 0-3 (range); 0 (single).
+        load_result_data: Set to true to load the well data from the OMERO screen result data
+        load_labels: Set to true to load the image labels
     """
     well_data_parser = WellDataParser(omero_data, well_pos)
-    well_data_parser.parse_well()
+    well_data_parser.parse_well(load_result_data)
     if well := well_data_parser._well:
         image_parser = ImageParser(omero_data, well, conn)
-        image_parser.parse_images_and_labels()
+        # Optionally disable: loading labels
+        image_parser.parse_images_and_labels(load_labels)
 
 
 # -----------------------------------------------USER INPUT -----------------------------------------------------
@@ -181,7 +209,7 @@ class UserInput:
         well_pos: str,
         image_input: str,
         conn,
-        time: str = "All"
+        time: str = "All",
     ):
         self._omero_data: OmeroData = omero_data
         self._plate_id: int = plate_id
@@ -290,7 +318,9 @@ class UserInput:
         Raises:
             ValueError: If the image index input format is invalid.
         """
-        self._omero_data.image_input = self._images # store this for use in saving training data
+        self._omero_data.image_input = (
+            self._images
+        )  # store this for use in saving training data
         index = self._images
 
         if not (
@@ -327,10 +357,7 @@ class UserInput:
         """
         time = self._time
 
-        if not (
-            time.lower() == "all"
-            or re.match(r"^\d+(-\d+)?$", time)
-        ):
+        if not (time.lower() == "all" or re.match(r"^\d+(-\d+)?$", time)):
             logger.error(
                 f"Image time '{time}' doesn't match any of the expected patterns 'All, 1-3, 1'."
             )
@@ -360,7 +387,13 @@ class UserInput:
         if self._plate:
             first_well = list(self._plate.listChildren())[0]
             image = first_well.getImage(0)
-            xyzct = [image.getSizeX(), image.getSizeY(), image.getSizeZ(), image.getSizeC(), image.getSizeT()]
+            xyzct = [
+                image.getSizeX(),
+                image.getSizeY(),
+                image.getSizeZ(),
+                image.getSizeC(),
+                image.getSizeT(),
+            ]
         else:
             logger.error("No plate found, unable to parse image time.")
             raise ValueError("No plate found, unable to parse image time.")
@@ -376,7 +409,13 @@ class UserInput:
         length = end - start
         # XYZCT format
         self._omero_data.crop_start = (0, 0, 0, 0, start)
-        self._omero_data.crop_length = (xyzct[0], xyzct[1], xyzct[2], xyzct[3], length)
+        self._omero_data.crop_length = (
+            xyzct[0],
+            xyzct[1],
+            xyzct[2],
+            xyzct[3],
+            length,
+        )
 
 
 # -----------------------------------------------PLATE DATA -----------------------------------------------------
@@ -899,7 +938,7 @@ class WellDataParser:
         self._metadata: Optional[dict] = None
         self._well_ifdata: Optional[pl.DataFrame] = None
 
-    def parse_well(self):
+    def parse_well(self, load_result_data: bool = True):
         self._parse_well_object()
         if self._well and self._well_id:
             self._omero_data.well_list.append(self._well)
@@ -915,6 +954,9 @@ class WellDataParser:
         else:
             logger.error(f"No metadata found for well {self._well_pos}.")
             raise ValueError(f"No metadata found for well {self._well_pos}.")
+        # Optionally disable use of the result data frame
+        if not load_result_data:
+            return
         self._load_well_csvdata()
         if self._well_ifdata is not None:
             self._omero_data.well_ifdata = pl.concat(
@@ -1012,10 +1054,13 @@ class ImageParser:
         self._image_arrays: list[np.ndarray] = []
         self._label_arrays: list[np.ndarray] = []
 
-    def parse_images_and_labels(self):
+    def parse_images_and_labels(self, load_labels: bool = True):
         self._parse_images()
-        self._parse_labels()
-        logger.info("Images and labels added to omero_data")
+        msg = ""
+        if load_labels:
+            self._parse_labels()
+            msg = "and labels "
+        logger.info(f"Images {msg}added to omero_data")
 
     def _parse_images(self):
         """
@@ -1056,7 +1101,9 @@ class ImageParser:
         """
         self._collect_labels()
         if self._omero_data.labels.size == 0:
-            logger.debug(f"Labels shape: {self._label_arrays[0].shape} ({self._label_arrays[0].dtype})")
+            logger.debug(
+                f"Labels shape: {self._label_arrays[0].shape} ({self._label_arrays[0].dtype})"
+            )
             self._omero_data.labels = np.stack(self._label_arrays, axis=0)
 
             logger.debug(
@@ -1083,15 +1130,27 @@ class ImageParser:
         for index in tqdm(self._image_index):
             if image := self._well.getImage(index):
                 # Support time point...
-                logger.info(f"Image {image.getId()}:tzyxc={image.getSizeT()},{image.getSizeZ()},{image.getSizeY()},{image.getSizeX()},{image.getSizeC()}:{image.getPixelsType()}")
+                logger.info(
+                    f"Image {image.getId()}:tzyxc={image.getSizeT()},{image.getSizeZ()},{image.getSizeY()},{image.getSizeX()},{image.getSizeC()}:{image.getPixelsType()}"
+                )
 
                 if mip_id := self.check_mip(image):
                     logger.info(
                         f"Image with index {index} has Z-stacks, looking for MIP with id {mip_id}."
                     )
-                    _, image_array = get_image(self._conn, int(mip_id), start_coords=start, axis_lengths=length)
+                    _, image_array = get_image(
+                        self._conn,
+                        int(mip_id),
+                        start_coords=start,
+                        axis_lengths=length,
+                    )
                 else:
-                    _, image_array = get_image(self._conn, image.getId(), start_coords=start, axis_lengths=length)
+                    _, image_array = get_image(
+                        self._conn,
+                        image.getId(),
+                        start_coords=start,
+                        axis_lengths=length,
+                    )
                 flatfield_corrected_image = self._flatfield_correct_image(
                     image_array
                 )
@@ -1177,11 +1236,18 @@ class ImageParser:
             # The labels may not have the same number of channels.
             axis_lengths = length
             if length and length[3] > 1:
-                image = self._conn.getObject('Image', label_data.getId())
+                image = self._conn.getObject("Image", label_data.getId())
                 if image and image.getSizeC() != length[3]:
-                    axis_lengths = length[:3] + (image.getSizeC(),) + length[4:]
+                    axis_lengths = (
+                        length[:3] + (image.getSizeC(),) + length[4:]
+                    )
 
-            _, label_array = get_image(self._conn, label_data.getId(), start_coords=start, axis_lengths=axis_lengths)
+            _, label_array = get_image(
+                self._conn,
+                label_data.getId(),
+                start_coords=start,
+                axis_lengths=axis_lengths,
+            )
 
             # Prefer 16-bit/32-bit integer
             m = np.max(label_array)
@@ -1198,8 +1264,12 @@ class ImageParser:
             else:
                 # Create a tuple of axes to squeeze, excluding the last axis
                 shape = label_array.shape
-                axes_to_squeeze = tuple(i for i in range(len(shape) - 1) if shape[i] == 1)
-                self._label_arrays.append(np.squeeze(label_array, axis=axes_to_squeeze))
+                axes_to_squeeze = tuple(
+                    i for i in range(len(shape) - 1) if shape[i] == 1
+                )
+                self._label_arrays.append(
+                    np.squeeze(label_array, axis=axes_to_squeeze)
+                )
 
 
 # -----------------------------------------------Stitching-----------------------------------------------------
@@ -1212,7 +1282,10 @@ class ImageParser:
 #     ):
 #         self._omero_data: OmeroData = omero_data
 
-def stitch_images(omero_data, rotation=0.0, overlap_x=0, overlap_y=0, edge=0, mode='reflect') -> np.ndarray:
+
+def stitch_images(
+    omero_data, rotation=0.0, overlap_x=0, overlap_y=0, edge=0, mode="reflect"
+) -> np.ndarray:
     """Stitch the images in the array according to the specified pattern
     when a full well is imaged at 10x on an Operetta microscope. Supports:
     5x5 grid with corners excluded which creates 21 images; 2x2 grid of 4 images.
@@ -1221,37 +1294,54 @@ def stitch_images(omero_data, rotation=0.0, overlap_x=0, overlap_y=0, edge=0, mo
     logger.debug("Stitching images %s", omero_data.images.shape)
     # N[T]YXC
     size = len(omero_data.images.shape)
-    assert size == 4 or size == 5, "The input array should be N-images of [T]YXC"
+    assert size == 4 or size == 5, (
+        "The input array should be N-images of [T]YXC"
+    )
     n = omero_data.images.shape[0]
     indices_pattern = _get_stitch_pattern(n)
 
     # YX order
     tiles = {}
     for y, row in enumerate(indices_pattern):
-      for x, idx in enumerate(row):
-        if idx != -1:
-          d = tiles.get(x)
-          if not d:
-            tiles[x] = d = dict()
-          d[y] = omero_data.images[idx]
+        for x, idx in enumerate(row):
+            if idx != -1:
+                d = tiles.get(x)
+                if not d:
+                    tiles[x] = d = dict()
+                d[y] = omero_data.images[idx]
 
     if size == 5:
-      l = []
-      for t in range(len(omero_data.images[0])):
-        tiles1 = dict()
-        for x, xd in tiles.items():
-          tiles1[x] = d = dict()
-          for y, im in xd.items():
-            d[y] = im[t]
-        l.append(compose_tiles(tiles1, rotation=rotation, ox=-overlap_x, oy=-overlap_y,
-          edge=edge, mode=mode))
-      stitched_image = np.stack(l)
+        l = []
+        for t in range(len(omero_data.images[0])):
+            tiles1 = dict()
+            for x, xd in tiles.items():
+                tiles1[x] = d = dict()
+                for y, im in xd.items():
+                    d[y] = im[t]
+            l.append(
+                compose_tiles(
+                    tiles1,
+                    rotation=rotation,
+                    ox=-overlap_x,
+                    oy=-overlap_y,
+                    edge=edge,
+                    mode=mode,
+                )
+            )
+        stitched_image = np.stack(l)
     else:
-      stitched_image = compose_tiles(tiles, rotation=rotation, ox=-overlap_x, oy=-overlap_y,
-        edge=edge, mode=mode)
+        stitched_image = compose_tiles(
+            tiles,
+            rotation=rotation,
+            ox=-overlap_x,
+            oy=-overlap_y,
+            edge=edge,
+            mode=mode,
+        )
 
     logger.debug("Stitched image shape: %s", stitched_image.shape)
     return stitched_image
+
 
 def _get_stitch_pattern(n: int) -> list[list[int]]:
     """
@@ -1263,108 +1353,130 @@ def _get_stitch_pattern(n: int) -> list[list[int]]:
         at the YX position is the index into the n tiles for that (X,Y) location.
     """
     if n == 21:
-      indices_pattern = [
-          [-1, 1, 2, 3, -1],  # Preserved -1 for empty
-          [8, 7, 6, 5, 4],  # Adjusted for zero-based indexing
-          [9, 10, 0, 11, 12],  # The first image is now 0 (zero-based)
-          [17, 16, 15, 14, 13],  # Adjusted for zero-based indexing
-          [-1, 18, 19, 20, -1],  # Preserved -1 for empty
-      ]
+        indices_pattern = [
+            [-1, 1, 2, 3, -1],  # Preserved -1 for empty
+            [8, 7, 6, 5, 4],  # Adjusted for zero-based indexing
+            [9, 10, 0, 11, 12],  # The first image is now 0 (zero-based)
+            [17, 16, 15, 14, 13],  # Adjusted for zero-based indexing
+            [-1, 18, 19, 20, -1],  # Preserved -1 for empty
+        ]
     elif n == 4:
-      indices_pattern = [
-          [1, 2],
-          [3, 0],
-      ]
+        indices_pattern = [
+            [1, 2],
+            [3, 0],
+        ]
     elif n == 2:
-      indices_pattern = [
-          [0, 1],
-      ]
+        indices_pattern = [
+            [0, 1],
+        ]
     elif n == 9:
-      indices_pattern = [
-          [1, 2, 3],
-          [6, 5, 4],
-          [7, 8, 0],
-      ]
+        indices_pattern = [
+            [1, 2, 3],
+            [6, 5, 4],
+            [7, 8, 0],
+        ]
     else:
         raise ValueError(f"Unsupported number of image tiles: {n}")
     return indices_pattern
 
+
 def compose_tiles(
-  tiles: dict[int, dict[int, np.array]],
-  rotation: float = 0,
-  ox: int = 0,
-  oy: int = 0,
-  edge: int = 0,
-  mode: str = 'reflect'):
-  """
-  Compose tiles into a single image. It is assumed all tiles are the same shape: YXC.
-  Args:
-      tiles (dict): Dictionary of dictionaries of np.array tiles, keyed by [x][y].
-      rotation (float): Rotation angle (degrees in counter-clockwise direction).
-      ox (int): Tile offset in x (use negative for overlap).
-      oy (int): Tile offset in y (use negative for overlap).
-      edge (int): Edge size for blending overlaps.
-      mode (str): Mode used to fill the rotated image outside the bounds
-      (‘constant’, ‘edge’, ‘symmetric’, ‘reflect’, ‘wrap’).
-  Returns
-      composed (np.array): The composed image (YXC).
-  """
-  # Compute tile grid dimensions
-  maxx = np.max(list(tiles.keys()))
-  maxy = 0
-  for x in tiles.values():
-    maxy = np.max(list(x.keys()), initial=maxy)
+    tiles: dict[int, dict[int, np.array]],
+    rotation: float = 0,
+    ox: int = 0,
+    oy: int = 0,
+    edge: int = 0,
+    mode: str = "reflect",
+):
+    """
+    Compose tiles into a single image. It is assumed all tiles are the same shape: YXC.
+    Args:
+        tiles (dict): Dictionary of dictionaries of np.array tiles, keyed by [x][y].
+        rotation (float): Rotation angle (degrees in counter-clockwise direction).
+        ox (int): Tile offset in x (use negative for overlap).
+        oy (int): Tile offset in y (use negative for overlap).
+        edge (int): Edge size for blending overlaps.
+        mode (str): Mode used to fill the rotated image outside the bounds
+        (‘constant’, ‘edge’, ‘symmetric’, ‘reflect’, ‘wrap’).
+    Returns
+        composed (np.array): The composed image (YXC).
+    """
+    # Compute tile grid dimensions
+    maxx = np.max(list(tiles.keys()))
+    maxy = 0
+    for x in tiles.values():
+        maxy = np.max(list(x.keys()), initial=maxy)
 
-  # Create rotated mask using the first image to set the dimensions.
-  # The mask uses nearest-neighbour interpolation to effectivly mark the pixels
-  # of interest.
-  y = next(iter(tiles[maxx]))
-  im = tiles[maxx][y]
-  os = im.shape
-  m = np.ones(os[0:2], dtype=int)
-  m = transform.rotate(m, rotation, resize=True, preserve_range=True, order=0)
-  ns = m.shape
+    # Create rotated mask using the first image to set the dimensions.
+    # The mask uses nearest-neighbour interpolation to effectivly mark the pixels
+    # of interest.
+    y = next(iter(tiles[maxx]))
+    im = tiles[maxx][y]
+    os = im.shape
+    m = np.ones(os[0:2], dtype=int)
+    m = transform.rotate(
+        m, rotation, resize=True, preserve_range=True, order=0
+    )
+    ns = m.shape
 
-  # preserve image type
-  dtype = im.dtype
+    # preserve image type
+    dtype = im.dtype
 
-  # Create weights for blending overlap.
-  if edge:
-    # Distance transform does not use out-of-bounds as background.
-    # So pad with 1 pixel and crop.
-    d = scipy.ndimage.distance_transform_edt(np.pad(m, 1))
-    d = d[1:-1, 1:-1]
-    d = np.clip(d, a_min=0, a_max=edge)
-    m = d / edge
+    # Create weights for blending overlap.
+    if edge:
+        # Distance transform does not use out-of-bounds as background.
+        # So pad with 1 pixel and crop.
+        d = scipy.ndimage.distance_transform_edt(np.pad(m, 1))
+        d = d[1:-1, 1:-1]
+        d = np.clip(d, a_min=0, a_max=edge)
+        m = d / edge
 
-  # Create output.
-  # Note that arrays are YXC format.
-  channels = os[2]
-  out = np.zeros(((maxy+1) * ns[0] + maxy * oy, (maxx+1) * ns[1] + maxx * ox, channels))
-  sum = np.zeros(out.shape[0:2])
+    # Create output.
+    # Note that arrays are YXC format.
+    channels = os[2]
+    out = np.zeros(
+        (
+            (maxy + 1) * ns[0] + maxy * oy,
+            (maxx + 1) * ns[1] + maxx * ox,
+            channels,
+        )
+    )
+    sum = np.zeros(out.shape[0:2])
 
-  # Rotate each image and insert
-  for x, d in tiles.items():
-    for y, im in d.items():
-      l = []
-      for c in range(channels):
-        # Multiply the rotation by the mask (which optionally weights pixels).
-        # The rotation uses bilinear interpolation with edge-pixel extension to generate
-        # reasonable intensity edge pixels. The mode can be varied.
-        l.append(m * transform.rotate(im[...,c], rotation, resize=True, preserve_range=True, order=1,
-          mode=mode))
-      # Original shape sets the translation
-      xp = x * (os[1] + ox)
-      yp = y * (os[0] + oy)
-      # New shape defines the range of the rotation image.
-      # Note that arrays are YX format.
-      out[yp : yp + ns[0], xp : xp + ns[1],:] += np.dstack(l)
-      sum[yp : yp + ns[0], xp : xp + ns[1]] += m
+    # Rotate each image and insert
+    for x, d in tiles.items():
+        for y, im in d.items():
+            l = []
+            for c in range(channels):
+                # Multiply the rotation by the mask (which optionally weights pixels).
+                # The rotation uses bilinear interpolation with edge-pixel extension to generate
+                # reasonable intensity edge pixels. The mode can be varied.
+                l.append(
+                    m
+                    * transform.rotate(
+                        im[..., c],
+                        rotation,
+                        resize=True,
+                        preserve_range=True,
+                        order=1,
+                        mode=mode,
+                    )
+                )
+            # Original shape sets the translation
+            xp = x * (os[1] + ox)
+            yp = y * (os[0] + oy)
+            # New shape defines the range of the rotation image.
+            # Note that arrays are YX format.
+            out[yp : yp + ns[0], xp : xp + ns[1], :] += np.dstack(l)
+            sum[yp : yp + ns[0], xp : xp + ns[1]] += m
 
-  indices = sum != 0
-  for c in range(channels):
-    out[..., c] = np.divide(out[..., c], sum, where=indices, out=np.zeros(sum.shape))
-  return _as_dtype(dtype, out)
+    indices = sum != 0
+    for c in range(channels):
+        out[..., c] = np.divide(
+            out[..., c], sum, where=indices, out=np.zeros(sum.shape)
+        )
+    return _as_dtype(dtype, out)
+
 
 def _as_dtype(dtype, array):
     """Return the result as the given type.
@@ -1374,14 +1486,21 @@ def _as_dtype(dtype, array):
     # Retain type
     if issubclass(dtype.type, np.integer):
         info = np.iinfo(dtype)
-        return np.clip(array, a_min=info.min, a_max=info.max, out=array).astype(dtype)
+        return np.clip(
+            array, a_min=info.min, a_max=info.max, out=array
+        ).astype(dtype)
     if issubclass(dtype.type, np.floating):
         info = np.finfo(dtype)
-        return np.clip(array, a_min=info.min, a_max=info.max, out=array).astype(dtype)
+        return np.clip(
+            array, a_min=info.min, a_max=info.max, out=array
+        ).astype(dtype)
     # Possibly not a correct dtype?
     return array
 
-def stitch_labels(omero_data, rotation=0.0, overlap_x=0, overlap_y=0) -> np.ndarray:
+
+def stitch_labels(
+    omero_data, rotation=0.0, overlap_x=0, overlap_y=0
+) -> np.ndarray:
     """Stitch the labels in the array according to the specified pattern
     when a full well is imaged at 10x on an Operetta microscope. Supports:
     5x5 grid with corners excluded which creates 21 images; 2x2 grid of 4 images.
@@ -1391,41 +1510,51 @@ def stitch_labels(omero_data, rotation=0.0, overlap_x=0, overlap_y=0) -> np.ndar
     logger.debug("Stitching labels %s", omero_data.labels.shape)
     # N[T]YXC
     size = len(omero_data.labels.shape)
-    assert size == 4 or size == 5, "The input array should be N-images of [T]YXC"
+    assert size == 4 or size == 5, (
+        "The input array should be N-images of [T]YXC"
+    )
     n = omero_data.labels.shape[0]
     indices_pattern = _get_stitch_pattern(n)
 
     tiles = {}
     for y, row in enumerate(indices_pattern):
-      for x, idx in enumerate(row):
-        if idx != -1:
-          d = tiles.get(x)
-          if not d:
-            tiles[x] = d = dict()
-          d[y] = omero_data.labels[idx]
-          np.save(f'lx{x}y{y}.npy', d[y])
+        for x, idx in enumerate(row):
+            if idx != -1:
+                d = tiles.get(x)
+                if not d:
+                    tiles[x] = d = dict()
+                d[y] = omero_data.labels[idx]
+                np.save(f"lx{x}y{y}.npy", d[y])
 
     if size == 5:
-      l = []
-      for t in range(len(omero_data.labels[0])):
-        tiles1 = dict()
-        for x, xd in tiles.items():
-          tiles1[x] = d = dict()
-          for y, im in xd.items():
-            d[y] = im[t]
-        l.append(compose_labels(tiles1, rotation=rotation, ox=-overlap_x, oy=-overlap_y))
-      stitched_image = np.stack(l)
+        l = []
+        for t in range(len(omero_data.labels[0])):
+            tiles1 = dict()
+            for x, xd in tiles.items():
+                tiles1[x] = d = dict()
+                for y, im in xd.items():
+                    d[y] = im[t]
+            l.append(
+                compose_labels(
+                    tiles1, rotation=rotation, ox=-overlap_x, oy=-overlap_y
+                )
+            )
+        stitched_image = np.stack(l)
     else:
-      stitched_image = compose_labels(tiles, rotation=rotation, ox=-overlap_x, oy=-overlap_y)
+        stitched_image = compose_labels(
+            tiles, rotation=rotation, ox=-overlap_x, oy=-overlap_y
+        )
 
     logger.debug("Stitched labels shape: %s", stitched_image.shape)
     return stitched_image
+
 
 def compose_labels(
     tiles: dict[int, dict[int, np.array]],
     rotation: float = 0,
     ox: int = 0,
-    oy: int = 0):
+    oy: int = 0,
+):
     """
     Compose labels tiles into a single image. It is assumed all tiles are the same shape: YXC.
     The unique ID of labels will be remapped. Overlapping labels on adjacent tiles are mapped
@@ -1442,46 +1571,60 @@ def compose_labels(
     maxx = np.max(list(tiles.keys()))
     maxy = 0
     for x in tiles.values():
-      maxy = np.max(list(x.keys()), initial=maxy)
+        maxy = np.max(list(x.keys()), initial=maxy)
 
     # Rotate the first image to set the dimensions.
     y = next(iter(tiles[maxx]))
     os = tiles[maxx][y].shape
-    ns = transform.rotate(np.ones(os[0:2], dtype=int), rotation, resize=True,
-      preserve_range=True, order=0).shape
+    ns = transform.rotate(
+        np.ones(os[0:2], dtype=int),
+        rotation,
+        resize=True,
+        preserve_range=True,
+        order=0,
+    ).shape
 
     # Create output.
     # Note that arrays are YXC format.
     channels = os[2]
-    out = list(np.zeros(((maxy+1) * ns[0] + maxy * oy, (maxx+1) * ns[1] + maxx * ox),
-      dtype=tiles[maxx][y].dtype) for i in range(channels))
+    out = list(
+        np.zeros(
+            ((maxy + 1) * ns[0] + maxy * oy, (maxx + 1) * ns[1] + maxx * ox),
+            dtype=tiles[maxx][y].dtype,
+        )
+        for i in range(channels)
+    )
 
     border = 0
     if ox < 0:
-      border = -ox
+        border = -ox
     if oy < 0:
-      border = max(border, -oy)
+        border = max(border, -oy)
 
     # Rotate each image and insert
     for x, d in tiles.items():
-      for y, im in d.items():
-        l = []
-        # Original shape sets the translation
-        xp = x * (os[1] + ox)
-        yp = y * (os[0] + oy)
-        for c in range(channels):
-          # The rotation uses nearest neighbour interpolation to maintain IDs.
-          i = transform.rotate(im[...,c], rotation, resize=True, preserve_range=True, order=0)
-          out[c] = merge_labels(out[c], i, xp=xp, yp=yp, border=border)
+        for y, im in d.items():
+            l = []
+            # Original shape sets the translation
+            xp = x * (os[1] + ox)
+            yp = y * (os[0] + oy)
+            for c in range(channels):
+                # The rotation uses nearest neighbour interpolation to maintain IDs.
+                i = transform.rotate(
+                    im[..., c],
+                    rotation,
+                    resize=True,
+                    preserve_range=True,
+                    order=0,
+                )
+                out[c] = merge_labels(out[c], i, xp=xp, yp=yp, border=border)
 
     return np.dstack(out)
 
+
 def merge_labels(
-    im1: np.array,
-    im2: np.array,
-    xp: int = 0,
-    yp: int = 0,
-    border: int = 0):
+    im1: np.array, im2: np.array, xp: int = 0, yp: int = 0, border: int = 0
+):
     """
     Merges the labels in image 2 into image 1. Image 2 may be smaller than image 1.
     Scans pixels in the border against the current labels. Any overlapping labels
@@ -1498,14 +1641,14 @@ def merge_labels(
     s = im2.shape
     # Avoid overlap analysis when no border or all-zero current image
     if not (border and im1.any()):
-      return _merge_nonoverlapping_labels(im1, im2, xp=xp, yp=yp)
+        return _merge_nonoverlapping_labels(im1, im2, xp=xp, yp=yp)
 
     # Extract current sub-image
     im1a = im1[yp : yp + s[0], xp : xp + s[1]]
     # Overlap mask
     overlap = (im1a != 0) & (im2 != 0)
     if not overlap.any():
-      return _merge_nonoverlapping_labels(im1, im2, xp=xp, yp=yp)
+        return _merge_nonoverlapping_labels(im1, im2, xp=xp, yp=yp)
 
     # Count size of label overlaps in border
     h1o = np.bincount(im1a.reshape(-1), weights=overlap.reshape(-1))
@@ -1517,14 +1660,14 @@ def merge_labels(
     rmap = np.zeros(len(h1o), dtype=np.uint16)
     id = 0
     for i, c in enumerate(h1o):
-      if c:
-        map[i] = id
-        rmap[id] = i
-        id += 1
+        if c:
+            map[i] = id
+            rmap[id] = i
+            id += 1
     h = np.zeros((np.nonzero(h2o)[0][-1] + 1, id), dtype=np.uint16)
     for a, b in zip(im2.reshape(-1), im1a.reshape(-1)):
-      if a and b:
-        h[a][map[b]] += 1
+        if a and b:
+            h[a][map[b]] += 1
 
     # Greedy assignment of overlaps based on intersect over size.
     # Count size of labels.
@@ -1534,13 +1677,13 @@ def merge_labels(
     overlaps = []
     # i=im1 mapped value; j=im2 value
     for j, a in enumerate(h):
-      for i, c in enumerate(a):
-        if c:
-          # i=im1 value
-          i = rmap[i]
-          # Compute max intersect over size
-          f = c / max(h1[i], h2[j])
-          overlaps.append((i, j, c, f))
+        for i, c in enumerate(a):
+            if c:
+                # i=im1 value
+                i = rmap[i]
+                # Compute max intersect over size
+                f = c / max(h1[i], h2[j])
+                overlaps.append((i, j, c, f))
     overlaps.sort(reverse=True, key=lambda x: x[-1])
 
     # Renumber the labels.
@@ -1558,44 +1701,44 @@ def merge_labels(
 
     # Remap the labels to use the ID from the object it overlaps.
     for i, j, c, f in overlaps:
-      f1 = c / h1[i]
-      f2 = c / h2[j]
-      # Either image could be the parent so make the largest overlap the child.
-      # Assign the child to the parent ID. If the child if already assigned
-      # it can be assumed that this is a smaller overlap of the child with some
-      # other object. Remove the overlap child pixels.
-      # If the parent is already assigned then assume a better child has already
-      # overlapped the parent. Remove the overlap child pixels.
-      # This works for a greedy algorithm.
-      if f1 > f2:
-        # current image is the child
-        if map1[i]:
-          remove1.append(i)
-          continue # Already assigned
-        if map2[j]:
-          remove1.append(i)
-          continue # Already assigned
-        map2[j] = j + m1
-        map1[i] = map2[j]
-      else:
-        # new image is the child
-        if map2[j]:
-          remove2.append(j)
-          continue # Already assigned
-        if map1[i]:
-          remove2.append(j)
-          continue # Already assigned
-        map1[i] = i
-        map2[j] = map1[i]
+        f1 = c / h1[i]
+        f2 = c / h2[j]
+        # Either image could be the parent so make the largest overlap the child.
+        # Assign the child to the parent ID. If the child if already assigned
+        # it can be assumed that this is a smaller overlap of the child with some
+        # other object. Remove the overlap child pixels.
+        # If the parent is already assigned then assume a better child has already
+        # overlapped the parent. Remove the overlap child pixels.
+        # This works for a greedy algorithm.
+        if f1 > f2:
+            # current image is the child
+            if map1[i]:
+                remove1.append(i)
+                continue  # Already assigned
+            if map2[j]:
+                remove1.append(i)
+                continue  # Already assigned
+            map2[j] = j + m1
+            map1[i] = map2[j]
+        else:
+            # new image is the child
+            if map2[j]:
+                remove2.append(j)
+                continue  # Already assigned
+            if map1[i]:
+                remove2.append(j)
+                continue  # Already assigned
+            map1[i] = i
+            map2[j] = map1[i]
 
     # Remove overlaps
     if remove2:
-      for v in remove2:
-        im2[(im2==v) & overlap] = 0
+        for v in remove2:
+            im2[(im2 == v) & overlap] = 0
     if remove1:
-      for v in remove1:
-        im1a[(im1a==v) & overlap] = 0
-      im1[yp : yp + s[0], xp : xp + s[1]] = im1a
+        for v in remove1:
+            im1a[(im1a == v) & overlap] = 0
+        im1[yp : yp + s[0], xp : xp + s[1]] = im1a
 
     # Remap the new image to unique IDs (if not mapped)
     map1 = np.where(map1 == 0, omap1, map1)
@@ -1605,14 +1748,14 @@ def merge_labels(
     # Compress IDs to ascending from 1
     u = set(map1)
     u.update(map2)
-    u.add(0) # Ensure zero is added so first mapped ID is 1
+    u.add(0)  # Ensure zero is added so first mapped ID is 1
     m = np.zeros(max(u) + 1, dtype=np.uint16)
     for i, v in enumerate(sorted(u)):
-      m[v] = i
+        m[v] = i
     for i, v in enumerate(map1):
-      map1[i] = m[v]
+        map1[i] = m[v]
     for i, v in enumerate(map2):
-      map2[i] = m[v]
+        map2[i] = m[v]
 
     # Remap the images
     map_array(im1, omap1, map1, out=im1)
@@ -1624,12 +1767,10 @@ def merge_labels(
 
     return im1
 
+
 def _merge_nonoverlapping_labels(
-    im1: np.array,
-    im2: np.array,
-    xp: int = 0,
-    yp: int = 0,
-    m1: int = 0):
+    im1: np.array, im2: np.array, xp: int = 0, yp: int = 0, m1: int = 0
+):
     """
     Merges the labels in image 2 into image 1. Image 2 may be smaller than image 1.
     Args:
@@ -1643,17 +1784,65 @@ def _merge_nonoverlapping_labels(
     """
     s = im2.shape
     if not m1:
-      m1 = np.max(im1)
+        m1 = np.max(im1)
     # Remap to unique IDs.
     # Simply add the previous max to the IDs and update the max.
     # This does not compress IDs as it is assumed both inputs
     # have ascending IDs from 1.
-    np.add(im2, m1, where=im2!=0, out=im2)
+    np.add(im2, m1, where=im2 != 0, out=im2)
     im1[yp : yp + s[0], xp : xp + s[1]] += im2
 
     return im1
+
 
 def _get_crop(omero_data: OmeroData):
     if omero_data.crop_start:
         return omero_data.crop_start, omero_data.crop_length
     return None, None
+
+
+# Adapted from omero-screen codebase
+@omero_connect
+def get_plate_alignments(
+    plate_id: int,
+    conn: Optional[BlitzGateway] = None,
+) -> pd.DataFrame:
+    """Get the alignments for the plate.
+
+    The alignments are: plate, well, x, y.
+
+    Args:
+        plate_id: The plate ID
+        conn: The BlitzGateway connection
+
+    Returns:
+        DataFrame of plate alignments
+
+    Raises:
+        Exception: if a plate does not exist; or if plates are missing the OMERO screen results
+    """
+    plate = conn.getObject("Plate", plate_id)
+    if plate is None:
+        raise Exception(f"Plate:{plate_id}")
+    filename = "alignment.csv"
+    original_file = None
+    for ann in plate.listAnnotations():
+        if isinstance(ann, FileAnnotationWrapper):
+            fn = ann.getFile().getName()
+            if fn and fn.lower() == filename:
+                original_file = ann.getFile()
+                break
+    df = None
+    if original_file:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tmp_path = os.path.join(temp_dir, original_file.getName())
+            with open(tmp_path, "wb") as file_on_disk:
+                for chunk in original_file.asFileObj():
+                    file_on_disk.write(chunk)
+            logger.info("Parsing CSV Metadata File")
+            df = pd.read_csv(tmp_path)
+    if df is None:
+        raise Exception(
+            f"Plate {plate_id} is missing alignment result data: {filename}"
+        )
+    return df
