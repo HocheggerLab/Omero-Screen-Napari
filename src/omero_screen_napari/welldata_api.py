@@ -1524,7 +1524,6 @@ def stitch_labels(
                 if not d:
                     tiles[x] = d = dict()
                 d[y] = omero_data.labels[idx]
-                np.save(f"lx{x}y{y}.npy", d[y])
 
     if size == 5:
         l = []
