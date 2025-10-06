@@ -48,7 +48,6 @@ def aligned_plate_widget(
     plate_id: str = "Plate ID",
     well_pos: str = "Well Position",
     image: int = 0,
-    time: str = "All",
 ) -> None:
     """
     This function is a widget for handling well data in a napari viewer.
@@ -69,7 +68,7 @@ def aligned_plate_widget(
 
     options = ["ignore_result_data", "ignore_scale_intensities"]
     parse_omero_data(
-        omero_data, plate_id, well_pos, str(image), time=time, options=options
+        omero_data, plate_id, well_pos, str(image), options=options
     )
     clear_viewer_layers(viewer)
     _add_image_to_viewer(viewer, all_channels)
@@ -85,7 +84,6 @@ def aligned_plate_widget(
             plate_other,
             well_pos,
             str(image),
-            time=time,
             options=options,
         )
         # Translate

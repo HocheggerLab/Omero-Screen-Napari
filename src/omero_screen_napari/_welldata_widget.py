@@ -214,7 +214,7 @@ def _generate_color_map(channel_names: list[str]) -> list[str | Colormap]:
     """
     Generate a list of color maps for the channels
     :param channel_names: channel names
-    :return: color map names
+    :return: color maps
     """
     # Napari supports vispy or matplotlib colormap names
 
@@ -279,14 +279,18 @@ def stitched_data_widget(
         mode=mode,
     )
     print(f"Stitched shape {stitched_images.shape} ({stitched_images.dtype})")
+    names = ["Stitched Image"] * len(omero_data.channel_data)
+    for k, v in omero_data.channel_data.items():
+        names[int(v)] = k
     viewer.add_image(
         stitched_images,
         contrast_limits=list(omero_data.intensities[0]),
         gamma=1,
         channel_axis=-1,
         scale=omero_data.pixel_size,
-        name="Stitched Image",
+        name=names,
     )
+    set_color_maps(viewer)
     if len(omero_data.labels):
         stitched_labels = stitch_labels(
             omero_data,
