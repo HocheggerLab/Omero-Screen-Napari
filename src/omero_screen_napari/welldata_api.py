@@ -1804,6 +1804,7 @@ def _get_crop(omero_data: OmeroData):
 @omero_connect
 def get_plate_alignments(
     plate_id: int,
+    sample_alignments: bool = False,
     conn: Optional[BlitzGateway] = None,
 ) -> pd.DataFrame:
     """Get the alignments for the plate.
@@ -1812,6 +1813,7 @@ def get_plate_alignments(
 
     Args:
         plate_id: The plate ID
+        sample_alignments: Set to True to obtain the alignments for each well sample
         conn: The BlitzGateway connection
 
     Returns:
@@ -1823,7 +1825,7 @@ def get_plate_alignments(
     plate = conn.getObject("Plate", plate_id)
     if plate is None:
         raise Exception(f"Plate:{plate_id}")
-    filename = "alignment.csv"
+    filename = "sample_alignment.csv" if sample_alignments else "alignment.csv"
     original_file = None
     for ann in plate.listAnnotations():
         if isinstance(ann, FileAnnotationWrapper):

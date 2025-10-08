@@ -48,6 +48,7 @@ def aligned_plate_widget(
     plate_id: str = "Plate ID",
     well_pos: str = "Well Position",
     image: int = 0,
+    per_sample: bool = False,
 ) -> None:
     """
     This function is a widget for handling well data in a napari viewer.
@@ -60,7 +61,7 @@ def aligned_plate_widget(
         raise ValueError("Invalid well position: " + well_pos)
 
     # Get alignment for the plate
-    alignments = get_plate_alignments(plate_id)
+    alignments = get_plate_alignments(plate_id, sample_alignments=per_sample)
     plates = alignments["plate"].unique()
     logger.info("Loaded alignments for plates: %s", plates)
 
@@ -87,16 +88,17 @@ def aligned_plate_widget(
             options=options,
         )
         # Translate
-        df = alignments[
-            (alignments["well"] == well_pos)
-            & (alignments["plate"] == plate_other)
-        ]
+        mask = (alignments["well"] == well_pos) & (
+            alignments["plate"] == plate_other
+        )
+        if per_sample:
+            mask = mask & (alignments["image_id"] == omero_data.image_ids[0])
+        df = alignments[mask]
         if df.empty:
             raise Exception(
                 f"Plate {plate_other} is missing alignment for well: {well_pos}"
             )
-        # Translation is from plate2 to plate1 so invert
-        trans = (df.iloc[0]["y"], df.iloc[0]["x"])
+        trans = (df.iloc[0]["x"], df.iloc[0]["y"])
         logger.info("Plate %d %s translation %s", plate_other, well_pos, trans)
 
         # Filter channels already added to the viewer (e.g duplicate alignment channel)
@@ -120,10 +122,13 @@ def _add_image_to_viewer(
     # Create translation
     translate = None
     if trans:
-        n = omero_data.images[..., 0].ndim
-        translate = np.zeros(n)
-        translate[-2] = trans[0]
-        translate[-1] = trans[1]
+        # A 1-D array of factors to shift each axis by. X is the last axis.
+        # Translation is broadcast to 0 in leading dimensions.
+        # Scaling is applied before translation so we must scale the translation.
+        translate = [
+            trans[1] * omero_data.pixel_size[1],
+            trans[0] * omero_data.pixel_size[0],
+        ]
 
     for i in range(num_channels):
         if channel_names[i] in all_channels:
