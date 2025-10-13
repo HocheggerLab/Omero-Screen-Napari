@@ -98,7 +98,8 @@ def aligned_plate_widget(
             raise Exception(
                 f"Plate {plate_other} is missing alignment for well: {well_pos}"
             )
-        trans = (df.iloc[0]["x"], df.iloc[0]["y"])
+        # Translation maps plate_id to plate_other so negate
+        trans = (-df.iloc[0]["x"], -df.iloc[0]["y"])
         logger.info("Plate %d %s translation %s", plate_other, well_pos, trans)
 
         # Filter channels already added to the viewer (e.g duplicate alignment channel)
