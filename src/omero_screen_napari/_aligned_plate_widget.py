@@ -48,7 +48,7 @@ def aligned_plate_widget(
     plate_id: str = "Plate ID",
     well_pos: str = "Well Position",
     image: int = 0,
-    per_sample: bool = False,
+    sample_alignments: bool = False,
 ) -> None:
     """
     This function is a widget for handling well data in a napari viewer.
@@ -61,7 +61,9 @@ def aligned_plate_widget(
         raise ValueError("Invalid well position: " + well_pos)
 
     # Get alignment for the plate
-    alignments = get_plate_alignments(plate_id, sample_alignments=per_sample)
+    alignments = get_plate_alignments(
+        plate_id, sample_alignments=sample_alignments
+    )
     plates = alignments["plate"].unique()
     logger.info("Loaded alignments for plates: %s", plates)
 
@@ -91,7 +93,7 @@ def aligned_plate_widget(
         mask = (alignments["well"] == well_pos) & (
             alignments["plate"] == plate_other
         )
-        if per_sample:
+        if sample_alignments:
             mask = mask & (alignments["image_id"] == omero_data.image_ids[0])
         df = alignments[mask]
         if df.empty:
